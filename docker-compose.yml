@@ -1,61 +1,102 @@
 version: '3.7'
+name: redpanda-pipeline
+networks:
+  redpanda_network:
+    driver: bridge
+volumes:
+  redpanda: null
 services:
   data-generator:
     build: ./data-generator
     container_name: data-generator
+    networks:
+      - redpanda_network
     depends_on:
       redpanda: { condition: service_healthy }
   redpanda:
-    image: docker.vectorized.io/vectorized/redpanda:v23.1.2
+    image: docker.redpanda.com/redpandadata/redpanda:v23.1.2
     container_name: redpanda
     command:
-     - redpanda start
-     - --overprovisioned
-     - --smp 1
-     - --memory 1G
-     - --reserve-memory 0M
-     - --node-id 0
-     - --check=false
-     - --kafka-addr 0.0.0.0:9092
-     - --advertise-kafka-addr redpanda:9092
-     - --pandaproxy-addr 0.0.0.0:8082
-     - --advertise-pandaproxy-addr redpanda:8082
-     - --set redpanda.enable_transactions=true
-     - --set redpanda.enable_idempotence=true
-     - --set redpanda.auto_create_topics_enabled=true
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --set redpanda.enable_transactions=true
+      - --set redpanda.enable_idempotence=true
+      - --set redpanda.auto_create_topics_enabled=true
     ports:
-     - 9092:9092
-     - 8081:8081
-     - 8082:8082
+      - 18081:18081
+      - 18082:18082
+      - 19092:19092
+      - 19644:9644
+      - 9092:9092
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    networks:
+      - redpanda_network
+    hostname: kafka
     healthcheck: { test: curl -f localhost:9644/v1/status/ready, interval: 1s, start_period: 30s }
-  # materialized:
-  #   image: materialize/materialized:v0.26.0
-  #   container_name: materialized
-  #   command: -w1
-  #   ports:
-  #     - 6875:6875
-  #   volumes:
-  #     - ./data/icao24_mapping_airbus.json.gz:/tmp/icao24_mapping_airbus.json.gz
-  # mzcli:
-  #   image: materialize/cli
-  #   container_name: mzcli
-  # dbt:
-  #   build: ./dbt
-  #   container_name: dbt
-  #   init: true
-  #   ports:
-  #     - 8000:8080
-  #   volumes:
-  #     - ./dbt/profiles.yml:/root/.dbt/profiles.yml
-  #     - ./dbt/:/usr/app/dbt
-  #   stdin_open: true
-  #   tty: true
-  #   depends_on:
-  #     - materialized
-  # metabase:
-  #   image: ${MIMG}/metabase
-  #   container_name: metabase
-  #   depends_on:
-  #      - materialized
-  #   ports:
-  #     - 3030:3000
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.2.2
+    restart: on-failure
+    container_name: redpanda-console
+    entrypoint: /bin/sh
+    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:9092"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://redpanda:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda:9644"]
+    ports:
+      - 8080:8080
+    networks:
+      - redpanda_network
+    depends_on:
+      - redpanda
+  materialized:
+    image: materialize/materialized:v0.26.0
+    container_name: materialized
+    command: -w1
+    ports:
+      - 6875:6875
+    networks:
+      - redpanda_network
+    volumes:
+      - ./data/icao24_mapping_airbus.json.gz:/tmp/icao24_mapping_airbus.json.gz
+  mzcli:
+    image: materialize/cli
+    container_name: mzcli
+    networks:
+      - redpanda_network
+  dbt:
+    build: ./dbt
+    container_name: dbt
+    init: true
+    ports:
+      - 8000:8080
+    networks:
+      - redpanda_network
+    volumes:
+      - ./dbt/profiles.yml:/root/.dbt/profiles.yml
+      - ./dbt/:/usr/app/dbt
+    stdin_open: true
+    tty: true
+    depends_on:
+      - materialized
